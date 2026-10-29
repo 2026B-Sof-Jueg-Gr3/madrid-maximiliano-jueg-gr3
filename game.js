@@ -31,7 +31,22 @@
   let particlesOn = true;
   let shakeOn = true;
   let difficulty = 'NORMAL';
-  let best = Number(localStorage.getItem('neonArenaBest') || 0);
+  // El almacenamiento puede estar bloqueado: nunca debe impedir jugar.
+  const storage = {
+    read(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (_) { return fallback; } },
+    write(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
+  };
+  let best = Number(storage.read('neonArenaBest', 0)) || 0;
+  const preferences = storage.read('neonArenaSettings', {}) || {};
+  soundOn = preferences.soundOn !== false;
+  particlesOn = preferences.particlesOn !== false;
+  shakeOn = preferences.shakeOn ?? !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  difficulty = ['NORMAL', 'FÁCIL', 'DIFÍCIL'].includes(preferences.difficulty) ? preferences.difficulty : 'NORMAL';
+  let remainingSpawns = 0, waveTotal = 0, waveActive = false;
+  let combo = 0, comboClock = 0, maxCombo = 0, kills = 0, survival = 0;
+  const rings = [], labels = [];
+  const DASH_COOLDOWN = 2.4;
+
 
   // Colecciones de objetos que se actualizan y dibujan en cada fotograma.
   const keys = new Set();
@@ -66,8 +81,10 @@
   }
   addEventListener('resize', resize); resize();
   function updateBest() {
-    best = Math.max(best, score);
-    localStorage.setItem('neonArenaBest', best);
+    if (score > best) {
+      best = score;
+      storage.write('neonArenaBest', best);
+    }
     $('best-score').textContent = String(best).padStart(6, '0');
   }
   $('best-score').textContent = String(best).padStart(6, '0');
@@ -105,7 +122,17 @@
 
   // ── 3. INTERFAZ, MENÚS Y HUD ─────────────────────────────────────────────
   function startGame() {
+    document.activeElement?.blur();
     score = 0;
+    combo = comboClock = maxCombo = kills = survival = 0;
+    remainingSpawns = waveTotal = 0;
+    waveActive = false;
+    rings.length = labels.length = 0;
+    player.dash = player.dashCooldown = 0;
+    player.recoil = shake = screenFlash = wavePulse = 0;
+    keys.clear();
+    $('menu').classList.remove('modal-state');
+    $('subpanel').classList.add('hidden');
     wave = 0;
     lives = 3;
     spawnClock = .7;
@@ -131,6 +158,7 @@
 
     updateHud();
     updateBoostHud();
+    updateCombatHud();
     showToast('PREPÁRATE');
     state = 'playing';
     $('menu').classList.add('hidden');
@@ -160,6 +188,9 @@
   function showMenu(panel = '') {
     state = 'menu';
     firing = false;
+    keys.clear();
+    $('toast').classList.add('hidden');
+    $('showcase').classList.toggle('hidden', !!panel);
     $('game-hud').classList.add('hidden');
     $('menu').classList.remove('hidden', 'modal-state');
 
@@ -198,6 +229,7 @@
   function togglePause() {
     if (state === 'playing') {
       state = 'paused';
+      keys.clear();
       firing = false;
       $('menu').classList.remove('hidden');
       $('menu').classList.add('modal-state');
@@ -210,6 +242,8 @@
         <button class="menu-button" data-action="menu">⌂ MENÚ PRINCIPAL</button>`;
     } else if (state === 'paused') {
       state = 'playing';
+      keys.clear();
+      document.activeElement?.blur();
       $('menu').classList.add('hidden');
       $('menu').classList.remove('modal-state');
       firing = false;
@@ -236,15 +270,19 @@
     if (control.id === 'shake-setting') shakeOn = control.checked;
     if (control.id === 'sound-setting') soundOn = control.checked;
     if (control.id === 'difficulty-setting') difficulty = control.value;
+    storage.write('neonArenaSettings', {soundOn, particlesOn, shakeOn, difficulty});
   });
   $('pause-button').addEventListener('click', togglePause);
 
   // ── 4. CONTROLES ─────────────────────────────────────────────────────────
   addEventListener('keydown', e => {
+    if (e.target.closest('input, select')) return;
     const k = e.key.toLowerCase();
+    if (e.target.closest('button') && [' ', 'enter'].includes(k)) return;
+    if (e.repeat && ['escape', 'p', 'shift', 'enter'].includes(k)) return;
     if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
     keys.add(k);
-    if (k === ' ') firing = true;
+    if (k === 'shift' && state === 'playing') dash();
 
     if (k === 'escape' || k === 'p') {
       if (state === 'playing' || state === 'paused') togglePause();
@@ -255,12 +293,18 @@
 
   addEventListener('keyup', e => {
     keys.delete(e.key.toLowerCase());
-    if (e.key === ' ') firing = false;
+
   });
   addEventListener('blur', () => {
     keys.clear();
     firing = false;
+    if (state === 'playing') togglePause();
   });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state === 'playing') { keys.clear(); togglePause(); }
+  });
+  canvas.addEventListener('contextmenu', event => event.preventDefault());
+  canvas.addEventListener('pointercancel', () => { firing = false; });
 
   canvas.addEventListener('pointermove', e => { const r = canvas.getBoundingClientRect(); mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; });
   canvas.addEventListener('pointerdown', e => {
@@ -273,6 +317,7 @@
   // ── 5. EFECTOS Y CREACIÓN DE ENTIDADES ───────────────────────────────────
   function burst(x, y, color, count = 18, force = 170) {
     if (!particlesOn) return;
+    count = Math.min(count, Math.max(0, 650 - particles.length));
     for (let i = 0; i < count; i++) {
       const angle = Math.random() * TAU;
       const speed = force * (.25 + Math.random() * .8);
@@ -315,13 +360,13 @@
   }
 
   // Crea enemigos en un borde aleatorio y elige su especie según la oleada.
-  function spawnEnemy() {
+  function spawnEnemy(forcedType) {
     const side = Math.floor(Math.random() * 4);
     const padding = 28;
     const x = side === 0 ? -padding : side === 1 ? w + padding : Math.random() * w;
     const y = side === 2 ? -padding : side === 3 ? h + padding : Math.random() * h;
     const roll = Math.random();
-    const type = chooseEnemyType(roll);
+    const type = forcedType || chooseEnemyType(roll);
     const stats = getEnemyStats(type);
     const difficultyScale = difficulty === 'FÁCIL' ? .78 : difficulty === 'DIFÍCIL' ? 1.28 : 1;
 
@@ -331,6 +376,8 @@
       vx: 0,
       vy: 0,
       ...stats,
+      maxHp: stats.hp,
+      flash: 0,
       speed: stats.speed * difficultyScale * (1 + wave * .035),
       type,
       wobble: Math.random() * TAU,
@@ -349,6 +396,7 @@
 
   function getEnemyStats(type) {
     const stats = {
+      boss: { r: 48, hp: 40 + wave * 4, speed: 38, color: '#ffb347' },
       brute: { r: 23, hp: 3, speed: 45, color: '#ff4b55' },
       runner: { r: 13, hp: 1, speed: 142, color: '#ffc247' },
       shooter: { r: 18, hp: 2, speed: 58, color: '#ff4bd8' },
@@ -388,6 +436,8 @@
   }
 
   function damagePlayer() {
+    if (state !== 'playing' || player.invulnerable > 0) return;
+    combo = comboClock = 0;
     if (player.shield > 0) {
       player.shield = 0;
       player.invulnerable = .9;
@@ -413,13 +463,22 @@
     updateTransientEffects(dt);
     if (state !== 'playing') return;
 
+    survival += dt;
+    comboClock = Math.max(0, comboClock - dt);
+    if (!comboClock) combo = 0;
     updatePlayer(dt);
     updateWave(dt);
     updatePlayerBullets(dt);
     updateEnemies(dt);
+    if (state !== 'playing') return;
     updateEnemyBullets(dt);
+    if (state !== 'playing') return;
     updatePickups(dt);
     updateParticles(dt);
+    updateCombatHud();
+    for (const list of [rings, labels]) {
+      for (let i = list.length - 1; i >= 0; i--) { list[i].life -= dt; if (list[i].life <= 0) list.splice(i, 1); }
+    }
   }
 
   // Estos efectos siguen avanzando también en el menú y durante la pausa.
@@ -447,6 +506,8 @@
     moveX /= inputLength;
     moveY /= inputLength;
 
+    player.dashCooldown = Math.max(0, player.dashCooldown - dt);
+    player.dash = Math.max(0, player.dash - dt);
     const boosted = player.speedBoost > 0;
     const drag = Math.exp(-7.5 * dt);
     const maxSpeed = boosted ? 520 : 390;
@@ -455,7 +516,7 @@
     player.vy = (player.vy + moveY * acceleration * dt) * drag;
 
     const speed = Math.hypot(player.vx, player.vy);
-    if (speed > maxSpeed) {
+    if (speed > maxSpeed && player.dash <= 0) {
       player.vx *= maxSpeed / speed;
       player.vy *= maxSpeed / speed;
     }
@@ -469,32 +530,80 @@
     if (player.trail.length > 13) player.trail.shift();
 
     shotClock -= dt;
-    if (firing && shotClock <= 0) {
+    if ((firing || keys.has(' ')) && shotClock <= 0) {
       shoot();
       shotClock = .115;
     }
   }
 
+  // Una oleada tiene un presupuesto finito. El descanso empieza al eliminar al último enemigo.
   function updateWave(dt) {
     spawnClock -= dt;
-    if (spawnClock > 0) return;
-
-    if (enemies.length === 0) {
+    if (!waveActive) {
+      if (spawnClock > 0) return;
       wave++;
-      updateHud();
-      showToast(`OLEADA ${String(wave).padStart(2, '0')}`);
+      waveActive = true;
+      remainingSpawns = Math.min(6 + wave * 3, 65);
+      if (wave % 5 === 0) { spawnEnemy('boss'); remainingSpawns = 6 + wave; }
+      waveTotal = remainingSpawns + enemies.length;
       wavePulse = 1;
+      showToast(wave % 5 === 0 ? 'ALERTA · CENTINELA' : `OLEADA ${String(wave).padStart(2, '0')}`);
       tone(220 + Math.min(wave, 12) * 18, .35, 'sawtooth', .045, 1.8);
+      updateHud();
     }
+    if (remainingSpawns > 0 && spawnClock <= 0) {
+      spawnEnemy(); remainingSpawns--;
+      spawnClock = Math.max(.25, .85 - wave * .035);
+    }
+    if (remainingSpawns === 0 && enemies.length === 0) {
+      waveActive = false; spawnClock = 3;
+      enemyShots.length = 0;
+      const bonus = wave * 150;
+      score += bonus;
+      if (wave % 5 === 0) lives = Math.min(3, lives + 1);
+      showToast(`SECTOR LIMPIO · +${bonus}`);
+      spawnPickup(w / 2, h / 2);
+      updateHud(); updateBest();
+    }
+  }
 
-    const enemiesToSpawn = Math.min(1 + Math.floor(wave * .42), 5);
-    for (let i = 0; i < enemiesToSpawn; i++) spawnEnemy();
-    spawnClock = Math.max(.42, 1.5 - wave * .055);
+  // Impulso breve con invulnerabilidad; si no hay movimiento usa la dirección de apuntado.
+  function dash() {
+    if (player.dashCooldown > 0) return;
+    const x = Number(keys.has('d') || keys.has('arrowright')) - Number(keys.has('a') || keys.has('arrowleft'));
+    const y = Number(keys.has('s') || keys.has('arrowdown')) - Number(keys.has('w') || keys.has('arrowup'));
+    const angle = x || y ? Math.atan2(y, x) : player.angle;
+    player.vx = Math.cos(angle) * 1500; player.vy = Math.sin(angle) * 1500;
+    player.dash = .22; player.dashCooldown = DASH_COOLDOWN;
+    player.invulnerable = Math.max(player.invulnerable, .3);
+    rings.push({x: player.x, y: player.y, color: '#00eaff', life: .5, max: .5});
+    burst(player.x, player.y, '#00eaff', 25, 180);
+    tone(160, .18, 'sawtooth', .035, 3);
+  }
+
+  function updateCombatHud() {
+    $('combo').textContent = `×${1 + Math.min(4, Math.floor(combo / 5))}`;
+    $('combo-fill').style.width = `${comboClock / 3 * 100}%`;
+    $('dash-fill').style.width = `${(1 - player.dashCooldown / DASH_COOLDOWN) * 100}%`;
+    $('dash-label').textContent = player.dashCooldown > 0 ? `RECARGA ${player.dashCooldown.toFixed(1)}s` : 'SHIFT · ESQUIVAR';
+    $('wave-progress').style.width = `${waveTotal ? (1 - (remainingSpawns + enemies.length) / waveTotal) * 100 : 0}%`;
+    $('enemies-left').textContent = waveActive ? `${remainingSpawns + enemies.length} HOSTILES` : 'SIGUIENTE SECTOR…';
+    const boss = enemies.find(enemy => enemy.type === 'boss');
+    $('boss-hud').classList.toggle('hidden', !boss);
+    if (boss) $('boss-fill').style.width = `${boss.hp / boss.maxHp * 100}%`;
+  }
+
+  // Colisión continua: evita que un proyectil rápido atraviese un enemigo entre fotogramas.
+  function segmentDistance(px, py, ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const t = clamp(((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy || 1), 0, 1);
+    return Math.hypot(px - ax - dx * t, py - ay - dy * t);
   }
 
   function updatePlayerBullets(dt) {
     for (let i = bullets.length - 1; i >= 0; i--) {
       const bullet = bullets[i];
+      bullet.px = bullet.x; bullet.py = bullet.y;
       bullet.x += bullet.vx * dt;
       bullet.y += bullet.vy * dt;
       bullet.life -= dt;
@@ -511,12 +620,13 @@
       const dy = player.y - enemy.y;
       const distance = Math.hypot(dx, dy) || 1;
 
+      enemy.flash = Math.max(0, enemy.flash - dt);
       moveEnemy(enemy, dx, dy, distance, dt);
       hitEnemyWithPlayerBullet(enemy, i);
 
-      if (enemies[i] && distance < enemy.r + 17 && player.invulnerable <= 0) {
-        enemies.splice(i, 1);
+      if (enemies.includes(enemy) && Math.hypot(player.x - enemy.x, player.y - enemy.y) < enemy.r + 14 && player.invulnerable <= 0) {
         damagePlayer();
+        if (state !== 'playing') return;
       }
     }
   }
@@ -527,6 +637,19 @@
     enemy.spin += dt * (enemy.type === 'brute' ? -.8 : 1.4);
 
     let direction = 1;
+    if (enemy.type === 'boss') {
+      enemy.fireClock -= dt;
+      if (enemy.fireClock <= 0) {
+        const count = enemy.hp < enemy.maxHp / 2 ? 16 : 10;
+        for (let i = 0; i < count; i++) {
+          const angle = enemy.spin + i * TAU / count;
+          enemyShots.push({x: enemy.x, y: enemy.y, vx: Math.cos(angle) * 185, vy: Math.sin(angle) * 185, life: 5});
+        }
+        enemy.fireClock = 1.6;
+        rings.push({x: enemy.x, y: enemy.y, color: enemy.color, life: .5, max: .5});
+      }
+      if (distance < 210) direction = -.3;
+    }
     if (enemy.type === 'shooter') {
       // El tirador busca una distancia cómoda y avisa cargando su núcleo.
       if (distance < 175) direction = -1;
@@ -556,9 +679,9 @@
   function hitEnemyWithPlayerBullet(enemy, enemyIndex) {
     for (let i = bullets.length - 1; i >= 0; i--) {
       const bullet = bullets[i];
-      if (Math.hypot(enemy.x - bullet.x, enemy.y - bullet.y) >= enemy.r + 5) continue;
+      if (segmentDistance(enemy.x, enemy.y, bullet.px ?? bullet.x, bullet.py ?? bullet.y, bullet.x, bullet.y) >= enemy.r + 5) continue;
 
-      const protectedByGuardian = enemy.type !== 'guardian' && isProtectedByGuardian(enemy);
+      const protectedByGuardian = enemy.type !== 'guardian' && enemy.type !== 'boss' && isProtectedByGuardian(enemy);
       bullets.splice(i, 1);
 
       if (protectedByGuardian) {
@@ -568,6 +691,7 @@
       }
 
       enemy.hp--;
+      enemy.flash = .1;
       burst(bullet.x, bullet.y, enemy.color, 7, 115);
       tone(260, .06, 'triangle', .025, 1.6);
 
@@ -582,10 +706,15 @@
     burst(enemy.x, enemy.y, enemy.color, heavyEnemy ? 34 : 24, 230);
     impact(1.2);
     enemies.splice(enemyIndex, 1);
-    score += enemy.type === 'brute' || enemy.type === 'guardian' ? 300
+    combo++; kills++; comboClock = 3; maxCombo = Math.max(maxCombo, combo);
+    const multiplier = 1 + Math.min(4, Math.floor(combo / 5));
+    const base = enemy.type === 'boss' ? 2500 : enemy.type === 'brute' || enemy.type === 'guardian' ? 300
       : enemy.type === 'runner' ? 150
       : enemy.type === 'shooter' ? 200
       : 100;
+    score += base * multiplier;
+    labels.push({x: enemy.x, y: enemy.y, text: `+${base * multiplier}`, life: .8});
+    rings.push({x: enemy.x, y: enemy.y, color: enemy.color, life: .55, max: .55});
     updateHud();
     updateBest();
     tone(660, .16, 'triangle', .06, 2.1);
@@ -595,6 +724,7 @@
   function updateEnemyBullets(dt) {
     for (let i = enemyShots.length - 1; i >= 0; i--) {
       const bullet = enemyShots[i];
+      bullet.px = bullet.x; bullet.py = bullet.y;
       bullet.x += bullet.vx * dt;
       bullet.y += bullet.vy * dt;
       bullet.life -= dt;
@@ -605,9 +735,10 @@
         continue;
       }
 
-      if (player.invulnerable <= 0 && Math.hypot(player.x - bullet.x, player.y - bullet.y) < 20) {
+      if (player.invulnerable <= 0 && segmentDistance(player.x, player.y, bullet.px, bullet.py, bullet.x, bullet.y) < 18) {
         enemyShots.splice(i, 1);
         damagePlayer();
+        if (state !== 'playing') return;
       }
     }
   }
@@ -640,13 +771,16 @@
   function endGame() {
     state = 'gameover';
     firing = false;
+    keys.clear();
+    $('toast').classList.add('hidden');
     updateBest();
     $('menu').classList.remove('hidden');
     $('subpanel').classList.remove('hidden');
     $('menu').classList.add('modal-state');
     $('subpanel').innerHTML = `
       <div class="eyebrow">FIN DE LA PARTIDA</div>
-      <h2>SE ACABÓ.</h2>
+      <h2>SEÑAL PERDIDA.</h2>
+      <div class="result-grid"><div><small>ELIMINADOS</small><strong>${kills}</strong></div><div><small>MEJOR RACHA</small><strong>${maxCombo}</strong></div><div><small>TIEMPO</small><strong>${Math.floor(survival / 60)}:${String(Math.floor(survival % 60)).padStart(2, '0')}</strong></div></div>
       <p>Puntuación: <strong style="color:#00eaff">${String(score).padStart(6, '0')}</strong><br>
         Oleada alcanzada: <strong style="color:#ff4ab9">${String(wave).padStart(2, '0')}</strong><br>
         Récord: <strong style="color:#ff4ab9">${String(best).padStart(6, '0')}</strong>
@@ -796,7 +930,9 @@
     }
 
     // Orden de capas: partículas, mejoras, disparos, enemigos y jugador.
+    if (state === 'menu') { drawAttractMode(); ctx.restore(); return; }
     drawParticles();
+    drawCombatEffects();
     drawPickups();
     drawProjectiles();
     drawEnemies();
@@ -914,7 +1050,7 @@
   function drawEnemies() {
     for (const enemy of enemies) {
       drawEnemy(enemy);
-      if (enemy.type !== 'guardian' && isProtectedByGuardian(enemy)) {
+      if (enemy.type !== 'guardian' && enemy.type !== 'boss' && isProtectedByGuardian(enemy)) {
         drawGuardianAura(enemy);
       }
     }
@@ -968,7 +1104,7 @@
     ctx.shadowBlur = 30;
     ctx.lineWidth = 2.8;
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = e.color;
+    ctx.strokeStyle = e.flash > 0 ? '#ffffff' : e.color;
     ctx.fillStyle = e.color + '42';
     ctx.beginPath();
     if (e.type === 'runner') {
@@ -1032,7 +1168,7 @@
       ctx.beginPath();
       ctx.arc(0, 0, e.r * .48, 0, TAU);
       ctx.stroke();
-    } else if (e.type === 'brute') {
+    } else if (e.type === 'brute' || e.type === 'boss') {
       // Blindado: rombo robusto y cuatro cuchillas en las esquinas.
       ctx.moveTo(0, -e.r * 1.25);
       ctx.lineTo(e.r * 1.05, -e.r * .38);
@@ -1109,6 +1245,33 @@
     }
     ctx.restore();
     ctx.shadowBlur = 0;
+  }
+  // Decoración viva del menú: reutiliza las mismas siluetas de la partida.
+  function drawAttractMode() {
+    if (w < 850) return;
+    const cx = w * .73, cy = h * .33;
+    ctx.save();
+    ctx.strokeStyle = '#00eaff20'; ctx.lineWidth = 1;
+    for (const radius of [85, 135, 175]) { ctx.beginPath(); ctx.arc(cx, cy, radius, 0, TAU); ctx.stroke(); }
+    ['hunter', 'runner', 'shooter', 'guardian', 'brute'].forEach((type, i) => {
+      const a = time * .13 + i * TAU / 5;
+      const stats = getEnemyStats(type);
+      drawEnemy({...stats, type, x: cx + Math.cos(a) * 145, y: cy + Math.sin(a) * 115, spin: time * .4 + i, wobble: i, fireClock: 1});
+    });
+    drawEnemy({...getEnemyStats('boss'), type: 'boss', x: cx, y: cy, spin: -time * .2, wobble: 0, fireClock: 1});
+    ctx.restore();
+  }
+
+  function drawCombatEffects() {
+    ctx.save();
+    for (const ring of rings) {
+      ctx.globalAlpha = ring.life / ring.max;
+      ctx.strokeStyle = ring.color; ctx.lineWidth = 2; ctx.shadowColor = ring.color; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(ring.x, ring.y, 12 + (1 - ring.life / ring.max) * 65, 0, TAU); ctx.stroke();
+    }
+    ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center'; ctx.fillStyle = '#eaffff'; ctx.shadowBlur = 0;
+    for (const label of labels) { ctx.globalAlpha = Math.min(1, label.life * 3); ctx.fillText(label.text, label.x, label.y - (1 - label.life) * 40); }
+    ctx.restore();
   }
   // ── 8. BUCLE PRINCIPAL ────────────────────────────────────────────────────
   function frame(now) {

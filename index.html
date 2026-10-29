@@ -13,9 +13,9 @@
   <!-- Menú principal y paneles secundarios (opciones, créditos, pausa y fin). -->
   <div id="menu" class="screen">
     <div class="menu-panel">
-      <div class="eyebrow">ARCADE SURVIVAL · 2089</div>
+      <div class="eyebrow">INDEPENDENT ARCADE · VOL. 02</div>
       <h1>NEON<span>//</span><br>ARENA</h1>
-      <p class="subtitle">SOBREVIVE A LA OLEADA</p>
+      <p class="subtitle">ENTRA. ESQUIVA. SUPERA TU LÍMITE.</p>
       <nav id="main-menu" class="menu-actions">
         <button class="menu-button primary" data-action="play"><span>01</span> JUGAR <b>↗</b></button>
         <button class="menu-button" data-action="options"><span>02</span> OPCIONES <b>＋</b></button>
@@ -23,8 +23,12 @@
       </nav>
       <div class="menu-foot"><span>MEJOR PUNTUACIÓN</span><strong id="best-score">000000</strong></div>
     </div>
+    <aside id="showcase" class="showcase" aria-label="Descripción del juego">
+      <div class="sector-tag"><span class="status-dot"></span> SECTOR 07 / ONLINE</div>
+      <div class="showcase-caption"><span>EL VACÍO TIENE COMPAÑÍA.</span><h2>Cinco amenazas.<br>Una sola nave.</h2><p>Encadena bajas, domina la esquiva y enfrenta al Centinela cada cinco oleadas.</p><div class="feature-tags"><span>COMBOS ×5</span><span>JEFES</span><span>NEÓN PURO</span></div></div>
+    </aside>
     <div id="subpanel" class="subpanel hidden"></div>
-    <div class="menu-controls">WASD mover <i>·</i> RATÓN apuntar <i>·</i> CLIC disparar <i>·</i> ESC pausa</div>
+    <div class="menu-controls">WASD mover <i>·</i> RATÓN apuntar <i>·</i> CLIC disparar <i>·</i> SHIFT esquivar <i>·</i> ESC pausa</div>
   </div>
 
   <!-- HUD visible durante la partida: puntuación, oleada, energía y mejoras. -->
@@ -33,11 +37,17 @@
     <div class="stat"><small>PUNTOS</small><strong id="score">000000</strong></div>
     <div class="stat"><small>OLEADA</small><strong id="wave">01</strong></div>
     <div class="stat lives-stat"><small>ENERGÍA</small><strong id="lives">◆ ◆ ◆</strong></div>
+    <div class="stat combo-stat"><small>COMBO</small><strong id="combo">×1</strong><div class="meter"><i id="combo-fill"></i></div></div>
     <div id="boost-status" class="boost-status"></div>
     <button id="pause-button" class="pause-button" aria-label="Pausar">Ⅱ</button>
   </div>
-  <div id="toast" class="toast hidden"></div>
-  <div class="game-footer"><span>SECTOR 07 · NEO TOKYO</span><span>NO SIGNAL. NO MERCY.</span></div>
+  <div id="combat-hud" class="combat-hud">
+    <div class="sector-progress"><span id="enemies-left">PREPÁRATE</span><div class="meter"><i id="wave-progress"></i></div></div>
+    <div class="dash-status"><span id="dash-label">SHIFT · ESQUIVAR</span><div class="meter"><i id="dash-fill"></i></div></div>
+    <div id="boss-hud" class="boss-hud hidden"><span>CENTINELA / NÚCLEO HOSTIL</span><div class="meter"><i id="boss-fill"></i></div></div>
+  </div>
+  <div id="toast" role="status" aria-live="polite" class="toast hidden"></div>
+  <div class="game-footer"><span>SECTOR 07 · NEO TOKYO</span><span>MAXIMILIANO MADRID BENAVIDES</span></div>
 
   <!-- La lógica vive en este archivo; los estilos se cargan desde styles.css. -->
   <script src="game.js"></script>
